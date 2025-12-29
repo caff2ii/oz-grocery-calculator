@@ -1,141 +1,126 @@
 import streamlit as st
 import pandas as pd
-import random
+import json
 from streamlit_gsheets import GSheetsConnection
 
-# --- 1. 基本設定 ---
-st.set_page_config(page_title="OZ Grocery Pro v1.7", layout="centered")
+st.set_page_config(page_title="OZ Grocery Pro v1.9", layout="centered")
 
-# 連接 Google Sheets
+# --- 1. 讀取數據 ---
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 @st.cache_data(ttl=5)
-def load_memory():
+def get_data_json():
     try:
         df = conn.read(worksheet="Sheet1")
         if not df.empty:
-            return pd.Series(df.Category.values, index=df.Item.str.upper()).to_dict()
-        return {}
+            # 準備畀 JS 用嘅資料格式：[{"item": "Milk", "cat": "Food 🍏"}, ...]
+            data = []
+            for _, row in df.iterrows():
+                data.append({"item": str(row['Item']).title(), "cat": str(row['Category'])})
+            return json.dumps(data)
+        return "[]"
     except:
-        return {}
+        return "[]"
 
-memory_dict = load_memory()
+history_json = get_data_json()
 
-# 初始化 Session State
+# --- 2. Session State ---
 if "shopping_cart" not in st.session_state:
     st.session_state.shopping_cart = []
-if "item_to_fill" not in st.session_state:
-    st.session_state.item_to_fill = ""
-if "random_id" not in st.session_state:
-    st.session_state.random_id = str(random.randint(1000, 9999))
 
-# --- 2. 邏輯函數 ---
-def add_to_cart():
-    # 這裡從 session_state 獲取當前 widget 的值
-    name = st.session_state.name_input.strip()
-    price = st.session_state.price_input
-    cat = st.session_state.cat_input
-    
-    if name and price > 0:
-        st.session_state.shopping_cart.append({
-            "Item": name.title(),
-            "Price": price,
-            "Category": cat
-        })
-        # 重置：清空暫存並更換 ID
-        st.session_state.item_to_fill = ""
-        st.session_state.random_id = str(random.randint(1000, 9999))
-        st.rerun()
+# --- 3. JS 注入 (核心黑科技) ---
+# 呢段代碼會喺前端畫一個隱藏嘅「數據池」，並監控輸入框
+st.markdown(f"""
+    <div id="js-logic">
+        <script>
+            // 獲取 Python 傳過嚟嘅歷史紀錄
+            const history = {history_json};
+            
+            // 定時檢查輸入框是否存在 (因為 Streamlit 會重新渲染)
+            const interval = setInterval(() => {{
+                const input = window.parent.document.querySelector('input[aria-label="1. 項目名稱 (JS 即時聯想)"]');
+                if (input && !input.dataset.listener) {{
+                    input.dataset.listener = "true";
+                    input.setAttribute('autocomplete', 'off'); // 停用瀏覽器紀錄
+                    
+                    // 建立建議列表容器
+                    const list = window.parent.document.createElement('div');
+                    list.id = "sug-list";
+                    list.style = "position:absolute; background:white; width:100%; z-index:1000; border:1px solid #ddd; border-top:none; display:none; color: black;";
+                    input.parentNode.appendChild(list);
 
-# --- 3. 介面 (UI) ---
-st.title("🛒 澳洲超市助手 v1.7")
+                    input.addEventListener('input', (e) => {{
+                        const val = e.target.value.toUpperCase();
+                        list.innerHTML = '';
+                        if (!val) {{ list.style.display = 'none'; return; }}
+                        
+                        const matches = history.filter(h => h.item.toUpperCase().includes(val)).slice(0, 5);
+                        if (matches.length > 0) {{
+                            list.style.display = 'block';
+                            matches.forEach(m => {{
+                                const item = window.parent.document.createElement('div');
+                                item.innerHTML = `<b>${{m.item}}</b> <small>(${{m.cat}})</small>`;
+                                item.style = "padding:10px; cursor:pointer; border-bottom:1px solid #eee;";
+                                item.onclick = () => {{
+                                    input.value = m.item;
+                                    input.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                                    input.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                                    list.style.display = 'none';
+                                    
+                                    // 自動填寫分類 (Streamlit 嘅 selectbox 比較難直接改，我哋靠 Python 判定)
+                                }};
+                                list.appendChild(item);
+                            }});
+                        }} else {{
+                            list.style.display = 'none';
+                        }}
+                    }});
+                }}
+            }}, 500);
+        </script>
+    </div>
+""", unsafe_allow_html=True)
 
-# --- 關鍵：名稱輸入格 ---
-# 我們將 value 綁定到 session_state.item_to_fill
-name_val = st.text_input(
-    "1. 項目名稱:", 
-    value=st.session_state.item_to_fill,
-    key="name_input",
-    placeholder="打字後按 Tab 顯示建議",
-    autocomplete="new-password"
-)
+# --- 4. 介面 (UI) ---
+st.title("🛒 超市助手 v1.9 (JS Engine)")
 
-# --- 智能建議區 (修正點擊填入邏輯) ---
-if name_val:
-    search_term = name_val.upper()
-    matches = [m for m in memory_dict.keys() if search_term in m][:3]
-    
-    if matches:
-        st.write("✨ **智能建議 (點選直接填入):**")
-        cols = st.columns(len(matches))
-        for idx, m in enumerate(matches):
-            # 點擊建議按鈕
-            if cols[idx].button(f"🛒 {m.title()}", key=f"sug_{idx}_{st.session_state.random_id}", use_container_width=True):
-                # 1. 更新暫存字串
-                st.session_state.item_to_fill = m.title()
-                # 2. 強制刷新頁面，讓 text_input 的 value 讀取新的 item_to_fill
-                st.rerun()
+name_val = st.text_input("1. 項目名稱 (JS 即時聯想)", key="name_input")
 
-st.divider()
-
-# 分類與金額
 col_p, col_c = st.columns(2)
-
 with col_c:
-    # 根據當前輸入的名稱（可能是點選後的）來預測分類
-    current_name = name_val.strip().upper()
-    predicted_cat = memory_dict.get(current_name, "Food 🍏")
+    # 呢度仲係用 Python 做分類預測
+    current_name = name_val.upper()
+    # 喺 history_json 搵返分類
+    history_list = json.loads(history_json)
+    found_cat = next((h['cat'] for h in history_list if h['item'].upper() == current_name), "Food 🍏")
+    
     cat_options = ["Food 🍏", "Household 🧻", "Other 📦"]
-    
-    # 修正：如果預測分類在選項中，自動設定 index
-    default_index = cat_options.index(predicted_cat) if predicted_cat in cat_options else 0
-    
-    st.selectbox(
-        "2. 分類:", 
-        options=cat_options,
-        index=default_index,
-        key="cat_input"
-    )
+    selected_cat = st.selectbox("2. 分類:", options=cat_options, index=cat_options.index(found_cat) if found_cat in cat_options else 0, key="cat_input")
 
 with col_p:
-    st.number_input(
-        "3. 金額 ($):", 
-        min_value=0.0, 
-        format="%.2f", 
-        key="price_input",
-        step=0.01
-    )
+    price = st.number_input("3. 金額 ($):", min_value=0.0, format="%.2f", key="price_input", step=0.01)
 
-if st.button("➕ 加入清單 (Enter)", use_container_width=True, type="primary"):
-    add_to_cart()
+if st.button("➕ 加入清單", use_container_width=True, type="primary"):
+    if name_val and price > 0:
+        st.session_state.shopping_cart.append({
+            "Item": name_val.title(),
+            "Price": price,
+            "Category": selected_cat
+        })
+        st.rerun()
 
-# --- 4. 清單與計算 ---
+# --- 5. 清單顯示 ---
 if st.session_state.shopping_cart:
     st.divider()
     df_cart = pd.DataFrame(st.session_state.shopping_cart)
+    st.table(df_cart)
     
-    for i, entry in enumerate(st.session_state.shopping_cart):
-        c1, c2, c3 = st.columns([3, 1, 1])
-        c1.write(f"**{entry['Item']}** ({entry['Category']})")
-        c2.write(f"${entry['Price']:.2f}")
-        if c3.button("🗑️", key=f"del_{i}"):
-            st.session_state.shopping_cart.pop(i)
-            st.rerun()
-
-    # 計算統計
-    st.divider()
-    discount = st.number_input("折扣 % OFF:", 0, 100, 0)
-    mult = (100 - discount) / 100
-    total = sum(item['Price'] for item in st.session_state.shopping_cart) * mult
+    total = df_cart['Price'].sum()
     st.success(f"### 總額: ${total:.2f}")
 
-    if st.button("💾 儲存並更新記憶", use_container_width=True):
-        try:
-            old_df = conn.read(worksheet="Sheet1")
-            new_data = df_cart[['Item', 'Category']].copy()
-            updated_df = pd.concat([old_df, new_data]).drop_duplicates(subset=['Item'], keep='last')
-            conn.update(worksheet="Sheet1", data=updated_df)
-            st.toast("✅ 成功存入雲端！")
-            st.cache_data.clear()
-        except Exception as e:
-            st.error(f"儲存失敗: {e}")
+    if st.button("💾 儲存並更新記憶庫", use_container_width=True):
+        old_df = conn.read(worksheet="Sheet1")
+        updated_df = pd.concat([old_df, df_cart[['Item', 'Category']]]).drop_duplicates(subset=['Item'], keep='last')
+        conn.update(worksheet="Sheet1", data=updated_df)
+        st.toast("✅ 儲存成功！")
+        st.cache_data.clear()
