@@ -1,4 +1,3 @@
-streamlit-gsheets
-streamlit-searchbox
 streamlit
 pandas
+streamlit-gsheets
