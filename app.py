@@ -1,79 +1,66 @@
 import streamlit as st
+from streamlit_gsheets import GSheetsConnection
 import pandas as pd
 
-st.set_page_config(page_title="OZ Grocery Pro", layout="wide")
+st.set_page_config(page_title="OZ Grocery Forever Memory")
 
-# --- 1. 初始化「記憶資料庫」 ---
-if 'memory' not in st.session_state:
-    # 預設一啲基本分類
-    st.session_state.memory = {
-        'MILK': 'Food 🍏',
-        'BREAD': 'Food 🍏',
-        'TOILET PAPER': 'Household 🧻',
-        'PANADOL': 'Household 🧻'
-    }
+# --- 1. 連接 Google Sheets ---
+# 注意：你需要喺 Streamlit Cloud 的 Secrets 設定中加入 Google Sheet URL
+conn = st.connection("gsheets", type=GSheetsConnection)
 
-if 'rows' not in st.session_state:
-    st.session_state.rows = [{"Item": "", "Price": 0.0, "Category": "Food 🍏"}]
+# 讀取現有的記憶
+@st.cache_data(ttl=60) # 每分鐘更新一次
+def load_memory():
+    try:
+        return conn.read(worksheet="Sheet1")
+    except:
+        return pd.DataFrame(columns=["Item", "Category"])
 
-# --- 2. 介面標題 ---
-st.title("🇦🇺 Woolies/Coles 智能清單")
-st.write("輸入 Item 會自動幫你記住分類，支持全單折扣計算。")
+memory_df = load_memory()
+memory_dict = pd.Series(memory_df.Category.values, index=memory_df.Item.values).to_dict()
 
-# --- 3. 折扣設定 ---
-with st.sidebar:
-    st.header("Settings")
-    discount_pct = st.number_input("全單折扣 (例如 9折輸入 10%)", min_value=0, max_value=100, value=0)
-    multiplier = (100 - discount_pct) / 100
+# --- 2. 介面 ---
+st.title("🇦🇺 永久記憶分類計數機")
 
-# --- 4. 互動表格區 ---
-st.subheader("清單內容")
-# 使用 data_editor 讓你可以像 Excel 編輯
-edited_df = st.data_editor(
-    pd.DataFrame(st.session_state.rows),
-    num_rows="dynamic",
-    column_config={
-        "Category": st.column_config.SelectboxColumn(
-            options=["Food 🍏", "Household 🧻", "Other 📦"]
-        )
-    },
-    use_container_width=True,
-    key="editor"
-)
+# 折扣設定
+discount = st.number_input("Discount % OFF (e.g. 10)", 0, 100, 0)
 
-# --- 5. 自動記憶分類邏輯 ---
-# 檢查有沒有新輸入的 Item 並更新記憶
-for index, row in edited_df.iterrows():
-    item_name = str(row['Item']).upper().strip()
-    if item_name:
-        if item_name in st.session_state.memory:
-            # 如果記憶中有，自動更新當前表格的分類 (這部分在 UI 體驗上會稍後反應)
-            edited_df.at[index, 'Category'] = st.session_state.memory[item_name]
-        else:
-            # 如果是新分類，記住它
-            st.session_state.memory[item_name] = row['Category']
+# 互動表格
+if "df" not in st.session_state:
+    st.session_state.df = pd.DataFrame([{"Item": "", "Price": 0.0, "Category": "Other 📦"}])
 
-# --- 6. 計算結果 ---
+def update_categories():
+    for idx, row in st.session_state.df.iterrows():
+        name = str(row['Item']).upper().strip()
+        if name in memory_dict:
+            st.session_state.df.at[idx, 'Category'] = memory_dict[name]
+
+# 顯示編輯表格
+edited_df = st.data_editor(st.session_state.df, num_rows="dynamic", use_container_width=True)
+
+# --- 3. 儲存新記憶 ---
+if st.button("💾 儲存並記住新項目"):
+    new_memory_entries = []
+    for _, row in edited_df.iterrows():
+        item = str(row['Item']).upper().strip()
+        if item and item not in memory_dict:
+            new_memory_entries.append({"Item": item, "Category": row['Category']})
+    
+    if new_memory_entries:
+        updated_df = pd.concat([memory_df, pd.DataFrame(new_memory_entries)], ignore_index=True)
+        conn.update(worksheet="Sheet1", data=updated_df)
+        st.success("記憶已更新到 Google Sheets！")
+        st.cache_data.clear() # 清除 Cache 以讀取新數據
+    else:
+        st.info("冇新項目需要記住。")
+
+# --- 4. 計算折扣金額 ---
+mult = (100 - discount) / 100
+food_total = edited_df[edited_df['Category'].str.contains("Food")]['Price'].sum() * mult
+house_total = edited_df[edited_df['Category'].str.contains("Household")]['Price'].sum() * mult
+
 st.divider()
-col1, col2, col3 = st.columns(3)
-
-# 基礎金額
-food_base = edited_df[edited_df['Category'] == "Food 🍏"]['Price'].sum()
-house_base = edited_df[edited_df['Category'] == "Household 🧻"]['Price'].sum()
-
-# 折扣後金額
-food_final = food_base * multiplier
-house_final = house_base * multiplier
-
-with col1:
-    st.metric("Food 🍏", f"${food_final:.2f}", help=f"Original: ${food_base:.2f}")
-with col2:
-    st.metric("Household 🧻", f"${house_final:.2f}", help=f"Original: ${house_base:.2f}")
-with col3:
-    st.metric("Total (Discounted)", f"${(food_final + house_final):.2f}")
-
-if discount_pct > 0:
-    st.success(f"已套用 {discount_pct}% OFF 折扣")
-
-# --- 7. 下載按鈕 ---
-st.download_button("Export to CSV", edited_df.to_csv(index=False), "grocery_list.csv")
+st.subheader(f"Total (After {discount}% Off)")
+st.write(f"🍏 Food: **${food_total:.2f}**")
+st.write(f"🧻 Household: **${house_total:.2f}**")
+st.write(f"💰 Total: **${food_total + house_total:.2f}**")
