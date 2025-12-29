@@ -3,7 +3,7 @@ import pandas as pd
 from streamlit_gsheets import GSheetsConnection
 
 # --- 1. 設定 ---
-st.set_page_config(page_title="OZ Grocery Pro v2.7", layout="centered")
+st.set_page_config(page_title="OZ Grocery Pro v2.8", layout="centered")
 
 conn = st.connection("gsheets", type=GSheetsConnection)
 
@@ -12,39 +12,44 @@ def load_data():
     try:
         df = conn.read(worksheet="Sheet1")
         if df is not None and not df.empty:
-            # 確保 Item 名稱統一轉成大寫方便比對
+            # 統一存儲大寫 key 方便對比
             return pd.Series(df.Category.values, index=df.Item.str.upper()).to_dict()
         return {}
     except:
         return {}
 
 history_dict = load_data()
-options = ["+ 新增項目"] + sorted([str(k).title() for k in history_dict.keys()])
+
+# --- 關鍵改動：預設選項係空白 ---
+# 排列：空白 -> + 新增項目 -> 歷史紀錄
+options = ["", "+ 新增項目"] + sorted([str(k).title() for k in history_dict.keys()])
 
 if "shopping_cart" not in st.session_state:
     st.session_state.shopping_cart = []
 if "reset_count" not in st.session_state:
     st.session_state.reset_count = 0
 
-st.title("🛒 超市助手 v2.7")
+st.title("🛒 超市助手 v2.8")
 
 # --- 2. 核心輸入區 ---
-# 用 reset_count 確保加入清單後完全清空
+# 每次 reset_count 增加，selectbox 會跳返去 index=0 (即係 "")
 current_key = f"item_select_{st.session_state.reset_count}"
 
 selected_item = st.selectbox(
-    "1. 搜尋或選擇項目:", 
+    "1. 搜尋項目 (直接打字):", 
     options=options,
+    index=0, # 預設選中第一個選項，即係 ""
     key=current_key
 )
 
-# 【關鍵修正】即時計算預測分類
-if selected_item == "+ 新增項目" or not selected_item:
+# 判定名稱
+final_name = ""
+pred_cat = "Food 🍏"
+
+if selected_item == "+ 新增項目":
     final_name = st.text_input("輸入新項目名稱:", key=f"manual_{st.session_state.reset_count}").strip()
-    pred_cat = "Food 🍏"
-else:
+elif selected_item != "":
     final_name = selected_item
-    # 喺字典搵返對應嘅分類
     pred_cat = history_dict.get(selected_item.upper(), "Food 🍏")
 
 st.divider()
@@ -53,19 +58,14 @@ col_p, col_c = st.columns(2)
 
 with col_c:
     cat_options = ["Food 🍏", "Household 🧻", "Other 📦"]
-    
-    # 搵出 pred_cat 喺 options 入面嘅位置
-    if pred_cat in cat_options:
-        target_index = cat_options.index(pred_cat)
-    else:
-        target_index = 0
+    target_index = cat_options.index(pred_cat) if pred_cat in cat_options else 0
 
-    # 顯示分類格：使用動態 index 確保連動
+    # 連動分類：當 selected_item 變動時，呢個格會重新生成
     category = st.selectbox(
         "2. 分類:",
         options=cat_options,
         index=target_index,
-        key=f"cat_select_{st.session_state.reset_count}_{selected_item}" # 加入 selected_item 作為 key 嘅一部分強制刷新
+        key=f"cat_{st.session_state.reset_count}_{selected_item}"
     )
 
 with col_p:
@@ -79,19 +79,20 @@ if st.button("➕ 加入清單", use_container_width=True, type="primary"):
             "Price": price,
             "Category": category
         })
+        # 增加 reset_count 令所有格變返初始狀態
         st.session_state.reset_count += 1
         st.rerun()
     else:
         st.warning("⚠️ 請填寫名稱同金額")
 
-# --- 4. 顯示清單與統計 ---
+# --- 4. 顯示清單與統計 (維持 v2.7 邏輯) ---
 if st.session_state.shopping_cart:
     st.divider()
     df_cart = pd.DataFrame(st.session_state.shopping_cart)
     
     for i, item in enumerate(st.session_state.shopping_cart):
         c1, c2, c3 = st.columns([3, 1, 1])
-        c1.write(f"**{item['Item']}** ({item['Category']})")
+        c1.write(f"**{item['Item']}**")
         c2.write(f"${item['Price']:.2f}")
         if c3.button("🗑️", key=f"del_{i}"):
             st.session_state.shopping_cart.pop(i)
@@ -101,17 +102,14 @@ if st.session_state.shopping_cart:
     discount_pct = st.number_input("全單折扣 % OFF:", 0, 100, 0, 5)
     mult = (100 - discount_pct) / 100
 
-    # 分類統計
     food_total = df_cart[df_cart["Category"] == "Food 🍏"]["Price"].sum() * mult
     house_total = df_cart[df_cart["Category"] == "Household 🧻"]["Price"].sum() * mult
-    other_total = df_cart[df_cart["Category"] == "Other 📦"]["Price"].sum() * mult
-    grand_total = food_total + house_total + other_total
+    grand_total = (df_cart["Price"].sum()) * mult
 
     st.write("### 📊 結帳小計")
     col1, col2 = st.columns(2)
-    col1.metric("Food 🍏 (折後)", f"${food_total:.2f}")
-    col2.metric("Household 🧻 (折後)", f"${house_total:.2f}")
-    
+    col1.metric("Food 🍏", f"${food_total:.2f}")
+    col2.metric("Household 🧻", f"${house_total:.2f}")
     st.success(f"## 應付總額: ${grand_total:.2f}")
 
     if st.button("💾 儲存並同步", use_container_width=True):
