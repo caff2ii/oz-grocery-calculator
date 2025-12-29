@@ -12,7 +12,6 @@ def load_memory():
     try:
         df = conn.read(worksheet="Sheet1")
         if not df.empty:
-            # 統一轉大寫做比對 Key
             return pd.Series(df.Category.values, index=df.Item.str.upper()).to_dict()
         return {}
     except:
@@ -25,45 +24,46 @@ if "shopping_cart" not in st.session_state:
 
 st.title("🛒 澳洲超市極速助手")
 
-# --- 2. 輸入區域 (使用 Form 確保 Enter 即 Submit 且清空) ---
-# clear_on_submit=True 會喺你撳 Enter 之後自動幫你清空所有格
+# --- 2. 聯想詞顯示 (放喺 Form 出面，純睇唔會改 Key) ---
+# 呢度用一個暫存變量嚟睇吓 user 打咗咩
+temp_input = st.text_input("搜尋舊項目 (聯想用):", key="search_bar", placeholder="打字睇吓買過咩...")
+if temp_input:
+    matches = [m for m in memory_dict.keys() if temp_input.upper() in m][:3]
+    if matches:
+        st.caption(f"🔍 你以前買過: {', '.join([m.title() for m in matches])}")
+
+# --- 3. 主要輸入 Form (清空邏輯) ---
 with st.form(key="grocery_form", clear_on_submit=True):
-    st.subheader("新增項目")
-    item_name = st.text_input("項目名稱 (Item Name):", placeholder="e.g. milk")
+    st.markdown("### 新增項目")
+    # 呢度唔用 key，避免同出面衝突，由 Form 處理清空
+    name = st.text_input("項目名稱 (Item Name):")
     
     col_p, col_c = st.columns(2)
     with col_p:
         price = st.number_input("金額 ($):", min_value=0.0, step=0.01, format="%.2f")
     with col_c:
-        # 預設 Food，如果你買過，後台會自動幫你更正
-        category = st.selectbox("分類 (Category):", ["Food 🍏", "Household 🧻", "Other 📦"])
+        category = st.selectbox("分類:", ["Food 🍏", "Household 🧻", "Other 📦"])
 
-    submit_button = st.form_submit_button("➕ 加入清單 (或直接按 Enter)", use_container_width=True)
+    submit = st.form_submit_button("➕ 加入 (按 Enter)", use_container_width=True)
 
-    if submit_button:
-        if item_name.strip() and price > 0:
-            raw_name = item_name.strip()
-            # --- 智能分類邏輯 ---
-            # 如果用家冇改分類（即係選預設），我就幫佢搵舊紀錄；如果有改過，就跟用家
+    if submit:
+        if name.strip() and price > 0:
+            raw_name = name.strip()
+            # 後台自動匹配分類
             final_cat = category
             if category == "Food 🍏" and raw_name.upper() in memory_dict:
                 final_cat = memory_dict[raw_name.upper()]
             
-            # 加入清單
             st.session_state.shopping_cart.append({
-                "Item": raw_name.title(), # 自動變第一個字大寫
+                "Item": raw_name.title(),
                 "Price": price,
                 "Category": final_cat
             })
-            st.rerun() # 立即刷新顯示
-        else:
-            st.error("請輸入有名稱同埋大於 0 嘅金額！")
+            st.rerun()
 
-# --- 3. 顯示清單與統計 ---
+# --- 4. 顯示清單與計算 ---
 if st.session_state.shopping_cart:
     st.divider()
-    st.subheader("📋 目前清單")
-    
     df_cart = pd.DataFrame(st.session_state.shopping_cart)
     
     for i, entry in enumerate(st.session_state.shopping_cart):
@@ -71,4 +71,29 @@ if st.session_state.shopping_cart:
         c1.write(f"**{entry['Item']}** ({entry['Category']})")
         c2.write(f"${entry['Price']:.2f}")
         if c3.button("🗑️", key=f"del_{i}"):
-            st.session_state.shopping_cart.pop(i
+            st.session_state.shopping_cart.pop(i)
+            st.rerun()
+
+    # 計算總額
+    st.divider()
+    discount = st.number_input("折扣 % OFF:", 0, 100, 0)
+    mult = (100 - discount) / 100
+    
+    f_tot = sum(x['Price'] for x in st.session_state.shopping_cart if "Food" in x['Category']) * mult
+    h_tot = sum(x['Price'] for x in st.session_state.shopping_cart if "Household" in x['Category']) * mult
+
+    st.metric("Food 🍏", f"${f_tot:.2f}")
+    st.metric("Household 🧻", f"${h_tot:.2f}")
+    st.success(f"💰 總額: ${f_tot + h_tot:.2f}")
+
+    if st.button("💾 儲存到 Google Sheets", type="primary", use_container_width=True):
+        try:
+            old_df = conn.read(worksheet="Sheet1")
+            new_data = df_cart[['Item', 'Category']].copy()
+            new_data['Item'] = new_data['Item'].str.title()
+            updated_df = pd.concat([old_df, new_data]).drop_duplicates(subset=['Item'], keep='last')
+            conn.update(worksheet="Sheet1", data=updated_df)
+            st.success("✅ 儲存成功！")
+            st.cache_data.clear()
+        except Exception as e:
+            st.error(f"儲存失敗: {e}")
