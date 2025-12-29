@@ -1,25 +1,18 @@
 import streamlit as st
 import pandas as pd
+from streamlit_gsheets import GSheetsConnection
 
-# 1. 基本設定
-st.set_page_config(page_title="OZ Grocery Fix", layout="centered")
+st.set_page_config(page_title="OZ Grocery Pro", layout="centered")
 
-# 從 Secrets 獲取連結 (請確保 Secrets 入面 spreadsheet 條 link 係啱嘅)
-try:
-    SHEET_URL = st.secrets["connections"]["gsheets"]["spreadsheet"]
-    # 將網址轉換為直接下載 CSV 嘅格式
-    CSV_URL = SHEET_URL.replace('/edit#gid=', '/export?format=csv&gid=').replace('/edit?usp=sharing', '/export?format=csv')
-except:
-    st.error("❌ 搵唔到 Secrets 入面嘅 spreadsheet 連結，請檢查 Streamlit Secrets 設定。")
-    st.stop()
+# 使用 Service Account 連接
+conn = st.connection("gsheets", type=GSheetsConnection)
 
-# 2. 讀取記憶功能 (直接用 pandas)
+# 1. 讀取記憶
 @st.cache_data(ttl=5)
 def load_memory():
     try:
-        # 直接由 Google Sheet 下載 CSV
-        df = pd.read_csv(CSV_URL)
-        if not df.empty and 'Item' in df.columns:
+        df = conn.read(worksheet="Sheet1")
+        if not df.empty:
             return pd.Series(df.Category.values, index=df.Item.str.upper()).to_dict()
         return {}
     except:
@@ -30,58 +23,54 @@ memory_dict = load_memory()
 if "shopping_cart" not in st.session_state:
     st.session_state.shopping_cart = []
 
-st.title("🛒 澳洲超市計數機 (修復版)")
+st.title("🛒 澳洲超市計數機 (Pro版)")
 
-# 3. 輸入 Form
-with st.form(key="my_form", clear_on_submit=True):
+# 2. 輸入 Form
+with st.form(key="input_form", clear_on_submit=True):
     col1, col2 = st.columns([2, 1])
     with col1:
-        item = st.text_input("項目名稱:")
+        item = st.text_input("項目名稱 (Item):")
     with col2:
-        price = st.number_input("金額:", min_value=0.0, format="%.2f")
+        price = st.number_input("金額 ($):", min_value=0.0, format="%.2f")
     
-    cat = st.selectbox("分類:", ["Food 🍏", "Household 🧻", "Other 📦"])
-    submit = st.form_submit_button("加入清單")
+    cat = st.selectbox("分類 (Category):", ["Food 🍏", "Household 🧻", "Other 📦"])
+    submitted = st.form_submit_button("➕ 加入清單")
 
-    if submit and item:
-        # 智能分類
+    if submitted and item:
+        # 如果買過，自動用返舊分類
         final_cat = memory_dict.get(item.strip().upper(), cat)
-        st.session_state.shopping_cart.append({"Item": item, "Price": price, "Category": final_cat})
+        st.session_state.shopping_cart.append({"Item": item.strip(), "Price": price, "Category": final_cat})
         st.rerun()
 
-# 4. 顯示清單
+# 3. 顯示與計算
 if st.session_state.shopping_cart:
     df_cart = pd.DataFrame(st.session_state.shopping_cart)
-    for i, row in df_cart.iterrows():
+    for i, entry in enumerate(st.session_state.shopping_cart):
         c1, c2, c3 = st.columns([3, 1, 1])
-        c1.write(f"{row['Item']} ({row['Category']})")
-        c2.write(f"${row['Price']:.2f}")
+        c1.write(f"**{entry['Item']}** ({entry['Category']})")
+        c2.write(f"${entry['Price']:.2f}")
         if c3.button("🗑️", key=f"del_{i}"):
             st.session_state.shopping_cart.pop(i)
             st.rerun()
 
-    # 5. 計算
-    discount = st.number_input("折扣 % OFF:", 0, 100, 0)
+    discount = st.number_input("全單折扣 % OFF:", 0, 100, 0)
     mult = (100 - discount) / 100
     
-    food = df_cart[df_cart['Category'].str.contains("Food")]['Price'].sum() * mult
-    house = df_cart[df_cart['Category'].str.contains("Household")]['Price'].sum() * mult
-    
-    st.divider()
-    st.metric("Food 🍏", f"${food:.2f}")
-    st.metric("Household 🧻", f"${house:.2f}")
-    st.success(f"總額: ${food + house:.2f}")
+    f_total = df_cart[df_cart['Category'].str.contains("Food")]['Price'].sum() * mult
+    h_total = df_cart[df_cart['Category'].str.contains("Household")]['Price'].sum() * mult
 
-    # 6. 儲存功能 (呢度我哋用返 st.connection 嘅 update，因為讀取最易出 400，寫入通常冇事)
-    if st.button("💾 儲存到 Google Sheets", type="primary"):
-        from streamlit_gsheets import GSheetsConnection
-        conn = st.connection("gsheets", type=GSheetsConnection)
+    st.divider()
+    st.metric("Food 🍏", f"${f_total:.2f}")
+    st.metric("Household 🧻", f"${h_total:.2f}")
+    st.info(f"### 總額: ${f_total + h_total:.2f}")
+
+    # 4. 儲存 (宜家有權限，一定儲到)
+    if st.button("💾 儲存並更新記憶庫", type="primary", use_container_width=True):
         try:
-            # 讀取現有
-            old_df = pd.read_csv(CSV_URL)
-            new_df = pd.concat([old_df, df_cart[['Item', 'Category']]]).drop_duplicates(subset=['Item'], keep='last')
-            conn.update(worksheet="Sheet1", data=new_df)
-            st.toast("✅ 儲存成功！")
+            old_df = conn.read(worksheet="Sheet1")
+            combined_df = pd.concat([old_df, df_cart[['Item', 'Category']]]).drop_duplicates(subset=['Item'], keep='last')
+            conn.update(worksheet="Sheet1", data=combined_df)
+            st.success("✅ 儲存成功！記憶庫已更新。")
             st.cache_data.clear()
         except Exception as e:
             st.error(f"儲存失敗: {e}")
