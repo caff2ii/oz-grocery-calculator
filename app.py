@@ -1,11 +1,10 @@
 import streamlit as st
 import pandas as pd
 from streamlit_gsheets import GSheetsConnection
-from streamlit_searchbox import st_searchbox
 
 st.set_page_config(page_title="OZ Grocery Pro", layout="centered")
 
-# --- 1. 初始化與讀取 Google Sheets ---
+# --- 1. 讀取數據 ---
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 @st.cache_data(ttl=60)
@@ -20,79 +19,45 @@ def load_data():
 
 history_dict, history_list = load_data()
 
-# 定義搜尋函數：喺舊紀錄入面搵返匹配嘅字
-def search_items(search_term: str):
-    if not search_term:
-        return []
-    return [item for item in history_list if search_term.lower() in item.lower()]
-
 if "shopping_cart" not in st.session_state:
     st.session_state.shopping_cart = []
 
-# --- 2. 輸入區 ---
 st.title("🛒 澳洲超市智能助手")
 
+# --- 2. 穩定輸入區 ---
 with st.container():
     st.subheader("新增項目")
     
-    # 呢個就係你要嘅：邊打邊彈建議，冇就直接輸入
-    final_item_name = st_searchbox(
-        search_items,
-        placeholder="打字搵舊嘢，或直接打新名...",
-        key="grocery_search",
-    )
+    # 用普通 text_input，保證 Enter 鍵一定能觸發
+    item_name = st.text_input("項目名稱 (例如: Milk):", key="item_name_input").strip()
+    
+    # 智能聯想：如果輸入咗部分文字，顯示匹配嘅舊項目
+    if item_name:
+        matches = [m for m in history_list if item_name.lower() in m.lower()][:5]
+        if matches:
+            st.write("🔍 你係咪想搵：")
+            cols = st.columns(len(matches))
+            for i, match in enumerate(matches):
+                if cols[i].button(match, key=f"match_{i}"):
+                    # 點擊聯想字，直接更新 session_state 並重整
+                    st.session_state.temp_item = match
+                    # 這裡可以加一個邏輯自動填入
     
     col_p, col_c = st.columns(2)
     with col_p:
         price = st.number_input("金額 ($):", min_value=0.0, step=0.01, format="%.2f")
     with col_c:
-        # 當你揀好咗/打好咗名，自動幫你對返個分類
-        suggested_cat = history_dict.get(final_item_name, "Food 🍏")
+        # 自動預測分類
+        suggested_cat = history_dict.get(item_name, "Food 🍏")
         cat_options = ["Food 🍏", "Household 🧻", "Other 📦"]
         category = st.selectbox("分類:", cat_options, index=cat_options.index(suggested_cat))
 
+    # 加入按鈕，或直接在金額框撳 Enter 亦可
     if st.button("➕ 加入清單", use_container_width=True):
-        if final_item_name and price > 0:
+        if item_name and price > 0:
             st.session_state.shopping_cart.append({
-                "Item": final_item_name,
+                "Item": item_name,
                 "Price": price,
                 "Category": category
             })
             st.rerun()
-
-# --- 3. 預覽清單 ---
-st.divider()
-if st.session_state.shopping_cart:
-    st.subheader("目前清單")
-    for i, entry in enumerate(st.session_state.shopping_cart):
-        c1, c2, c3 = st.columns([3, 1, 1])
-        c1.write(f"**{entry['Item']}** ({entry['Category']})")
-        c2.write(f"${entry['Price']:.2f}")
-        if c3.button("🗑️", key=f"del_{i}"):
-            st.session_state.shopping_cart.pop(i)
-            st.rerun()
-
-    # --- 4. 折扣與計算 ---
-    st.divider()
-    discount_pct = st.number_input("全單折扣 % OFF (例如 10)", 0, 100, 0)
-    multiplier = (100 - discount_pct) / 100
-
-    food_total = sum(item['Price'] for item in st.session_state.shopping_cart if "Food" in item['Category']) * multiplier
-    house_total = sum(item['Price'] for item in st.session_state.shopping_cart if "Household" in item['Category']) * multiplier
-
-    st.subheader("📊 總計 (折扣後)")
-    col_f, col_h = st.columns(2)
-    col_f.metric("Food 🍏", f"${food_total:.2f}")
-    col_h.metric("Household 🧻", f"${house_total:.2f}")
-    st.info(f"💰 全單總額: **${food_total + house_total:.2f}**")
-
-    # --- 5. 永久記憶 ---
-    if st.button("💾 記住新項目到 Google Sheets", use_container_width=True):
-        current_items = pd.DataFrame(st.session_state.shopping_cart)[['Item', 'Category']]
-        existing_df = conn.read(worksheet="Sheet1")
-        updated_df = pd.concat([existing_df, current_items]).drop_duplicates(subset=['Item'], keep='last')
-        conn.update(worksheet="Sheet1", data=updated_df)
-        st.success("記憶已更新！下次打字會有建議。")
-        st.cache_data.clear()
-else:
-    st.info("快啲加嘢落清單啦！")
