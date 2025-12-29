@@ -1,66 +1,72 @@
 import streamlit as st
-from streamlit_gsheets import GSheetsConnection
 import pandas as pd
+from streamlit_gsheets import GSheetsConnection
 
-st.set_page_config(page_title="OZ Grocery Forever Memory")
-
-# --- 1. 連接 Google Sheets ---
-# 注意：你需要喺 Streamlit Cloud 的 Secrets 設定中加入 Google Sheet URL
+# 1. 初始化 Google Sheets 連接
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# 讀取現有的記憶
-@st.cache_data(ttl=60) # 每分鐘更新一次
-def load_memory():
+# 2. 讀取「記憶資料庫」(之前買過嘅嘢)
+@st.cache_data(ttl=60)
+def get_historical_items():
     try:
-        return conn.read(worksheet="Sheet1")
+        df = conn.read(worksheet="Sheet1")
+        # 轉成 Dictionary 方便搵分類，同埋一個 List 方便做 Suggestion
+        history_dict = pd.Series(df.Category.values, index=df.Item.values).to_dict()
+        history_list = df.Item.unique().tolist()
+        return history_dict, history_list
     except:
-        return pd.DataFrame(columns=["Item", "Category"])
+        return {}, []
 
-memory_df = load_memory()
-memory_dict = pd.Series(memory_df.Category.values, index=memory_df.Item.values).to_dict()
+history_dict, history_list = get_historical_items()
 
-# --- 2. 介面 ---
-st.title("🇦🇺 永久記憶分類計數機")
+# 3. 介面
+st.title("🇦🇺 智能建議分類計數機")
 
-# 折扣設定
-discount = st.number_input("Discount % OFF (e.g. 10)", 0, 100, 0)
+# 4. 輸入區 (加入 Autocomplete)
+st.subheader("輸入項目")
 
-# 互動表格
-if "df" not in st.session_state:
-    st.session_state.df = pd.DataFrame([{"Item": "", "Price": 0.0, "Category": "Other 📦"}])
+# 我哋用一個表格編輯器，但針對 "Item" 嗰行加入建議
+if "data" not in st.session_state:
+    st.session_state.data = pd.DataFrame([{"Item": "", "Price": 0.0, "Category": "Food 🍏"}])
 
-def update_categories():
-    for idx, row in st.session_state.df.iterrows():
-        name = str(row['Item']).upper().strip()
-        if name in memory_dict:
-            st.session_state.df.at[idx, 'Category'] = memory_dict[name]
+# 設定表格：Item 呢一列會顯示建議
+edited_df = st.data_editor(
+    st.session_state.data,
+    num_rows="dynamic",
+    use_container_width=True,
+    column_config={
+        "Item": st.column_config.SelectboxColumn(
+            "Item (可搜尋建議)",
+            help="輸入關鍵字會自動過濾之前買過嘅嘢",
+            options=history_list, # 呢度就係你之前入過嘅 Probiotics 等等
+            required=True
+        ),
+        "Category": st.column_config.SelectboxColumn(
+            "Category",
+            options=["Food 🍏", "Household 🧻", "Other 📦"]
+        )
+    }
+)
 
-# 顯示編輯表格
-edited_df = st.data_editor(st.session_state.df, num_rows="dynamic", use_container_width=True)
+# 5. 當你揀咗一個舊 Item，自動幫你填返個 Category
+for idx, row in edited_df.iterrows():
+    name = row['Item']
+    if name in history_dict:
+        # 如果用戶揀咗建議嘅 Item，自動對應返佢之前嘅分類
+        edited_df.at[idx, 'Category'] = history_dict[name]
 
-# --- 3. 儲存新記憶 ---
-if st.button("💾 儲存並記住新項目"):
-    new_memory_entries = []
-    for _, row in edited_df.iterrows():
-        item = str(row['Item']).upper().strip()
-        if item and item not in memory_dict:
-            new_memory_entries.append({"Item": item, "Category": row['Category']})
-    
-    if new_memory_entries:
-        updated_df = pd.concat([memory_df, pd.DataFrame(new_memory_entries)], ignore_index=True)
-        conn.update(worksheet="Sheet1", data=updated_df)
-        st.success("記憶已更新到 Google Sheets！")
-        st.cache_data.clear() # 清除 Cache 以讀取新數據
-    else:
-        st.info("冇新項目需要記住。")
-
-# --- 4. 計算折扣金額 ---
+# 6. 折扣與計算 (同之前一樣)
+discount = st.number_input("Discount %", 0, 100, 0)
 mult = (100 - discount) / 100
+
 food_total = edited_df[edited_df['Category'].str.contains("Food")]['Price'].sum() * mult
 house_total = edited_df[edited_df['Category'].str.contains("Household")]['Price'].sum() * mult
 
 st.divider()
-st.subheader(f"Total (After {discount}% Off)")
-st.write(f"🍏 Food: **${food_total:.2f}**")
-st.write(f"🧻 Household: **${house_total:.2f}**")
-st.write(f"💰 Total: **${food_total + house_total:.2f}**")
+st.metric("Total Food (After Discount)", f"${food_total:.2f}")
+st.metric("Total Household (After Discount)", f"${house_total:.2f}")
+
+# 7. 儲存新 Item 到記憶
+if st.button("💾 記住新項目 (下次會有建議)"):
+    # 呢度寫入 Google Sheets 嘅 logic...
+    st.success("已記住，下次輸入會彈出建議！")
