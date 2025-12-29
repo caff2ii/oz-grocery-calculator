@@ -4,7 +4,7 @@ import random
 from streamlit_gsheets import GSheetsConnection
 
 # --- 1. 基本設定 ---
-st.set_page_config(page_title="OZ Grocery Pro v1.6", layout="centered")
+st.set_page_config(page_title="OZ Grocery Pro v1.7", layout="centered")
 
 # 連接 Google Sheets
 conn = st.connection("gsheets", type=GSheetsConnection)
@@ -27,11 +27,11 @@ if "shopping_cart" not in st.session_state:
 if "item_to_fill" not in st.session_state:
     st.session_state.item_to_fill = ""
 if "random_id" not in st.session_state:
-    st.session_state.random_id = str(random.randint(100000, 999999))
+    st.session_state.random_id = str(random.randint(1000, 9999))
 
 # --- 2. 邏輯函數 ---
 def add_to_cart():
-    # 獲取當前 widget 的值
+    # 這裡從 session_state 獲取當前 widget 的值
     name = st.session_state.name_input.strip()
     price = st.session_state.price_input
     cat = st.session_state.cat_input
@@ -42,45 +42,39 @@ def add_to_cart():
             "Price": price,
             "Category": cat
         })
-        # 清空並強制重新生成 ID 阻斷瀏覽器記憶
+        # 重置：清空暫存並更換 ID
         st.session_state.item_to_fill = ""
-        st.session_state.random_id = str(random.randint(100000, 999999))
+        st.session_state.random_id = str(random.randint(1000, 9999))
         st.rerun()
 
 # --- 3. 介面 (UI) ---
-st.title("🛒 澳洲超市助手 v1.6")
+st.title("🛒 澳洲超市助手 v1.7")
 
-# 這裡我們用 placeholder 確保建議區塊永遠在輸入框「正下方」
-input_container = st.container()
-suggestion_container = st.empty() # 👈 關鍵：用來即時刷新的容器
+# --- 關鍵：名稱輸入格 ---
+# 我們將 value 綁定到 session_state.item_to_fill
+name_val = st.text_input(
+    "1. 項目名稱:", 
+    value=st.session_state.item_to_fill,
+    key="name_input",
+    placeholder="打字後按 Tab 顯示建議",
+    autocomplete="new-password"
+)
 
-with input_container:
-    # 移除關鍵字搜尋的延遲感：
-    # 雖然 Streamlit 原生 text_input 依然需要 Enter 或 Tab 觸發，
-    # 但我哋可以透過佈局讓它看起來更直覺。
-    name_val = st.text_input(
-        "1. 輸入項目:", 
-        value=st.session_state.item_to_fill,
-        key="name_input",
-        placeholder="打完名撳 Tab 或 Enter 睇建議",
-        autocomplete="new-password" # 👈 雙重保險停用 Chrome Autocomplete
-    )
-
-# --- 真正即時渲染建議 ---
-# 只要 name_val 變動，呢個 container 會即刻重新整理
-with suggestion_container:
-    if name_val:
-        search_term = name_val.upper()
-        matches = [m for m in memory_dict.keys() if search_term in m][:3]
-        
-        if matches:
-            st.write("✨ **你係咪搵緊：**")
-            cols = st.columns(len(matches))
-            for idx, m in enumerate(matches):
-                # 點擊建議掣會直接填入並 rerun
-                if cols[idx].button(f"🛒 {m.title()}", key=f"sug_{idx}_{st.session_state.random_id}", use_container_width=True):
-                    st.session_state.item_to_fill = m.title()
-                    st.rerun()
+# --- 智能建議區 (修正點擊填入邏輯) ---
+if name_val:
+    search_term = name_val.upper()
+    matches = [m for m in memory_dict.keys() if search_term in m][:3]
+    
+    if matches:
+        st.write("✨ **智能建議 (點選直接填入):**")
+        cols = st.columns(len(matches))
+        for idx, m in enumerate(matches):
+            # 點擊建議按鈕
+            if cols[idx].button(f"🛒 {m.title()}", key=f"sug_{idx}_{st.session_state.random_id}", use_container_width=True):
+                # 1. 更新暫存字串
+                st.session_state.item_to_fill = m.title()
+                # 2. 強制刷新頁面，讓 text_input 的 value 讀取新的 item_to_fill
+                st.rerun()
 
 st.divider()
 
@@ -88,14 +82,18 @@ st.divider()
 col_p, col_c = st.columns(2)
 
 with col_c:
-    current_upper = name_val.strip().upper()
-    pred_cat = memory_dict.get(current_upper, "Food 🍏")
+    # 根據當前輸入的名稱（可能是點選後的）來預測分類
+    current_name = name_val.strip().upper()
+    predicted_cat = memory_dict.get(current_name, "Food 🍏")
     cat_options = ["Food 🍏", "Household 🧻", "Other 📦"]
+    
+    # 修正：如果預測分類在選項中，自動設定 index
+    default_index = cat_options.index(predicted_cat) if predicted_cat in cat_options else 0
     
     st.selectbox(
         "2. 分類:", 
         options=cat_options,
-        index=cat_options.index(pred_cat) if pred_cat in cat_options else 0,
+        index=default_index,
         key="cat_input"
     )
 
@@ -108,33 +106,36 @@ with col_p:
         step=0.01
     )
 
-if st.button("➕ 加入清單", use_container_width=True, type="primary"):
+if st.button("➕ 加入清單 (Enter)", use_container_width=True, type="primary"):
     add_to_cart()
 
-# --- 4. 清單顯示 (保持 v1.5 的簡潔) ---
+# --- 4. 清單與計算 ---
 if st.session_state.shopping_cart:
     st.divider()
+    df_cart = pd.DataFrame(st.session_state.shopping_cart)
+    
     for i, entry in enumerate(st.session_state.shopping_cart):
         c1, c2, c3 = st.columns([3, 1, 1])
-        c1.write(f"**{entry['Item']}**")
+        c1.write(f"**{entry['Item']}** ({entry['Category']})")
         c2.write(f"${entry['Price']:.2f}")
         if c3.button("🗑️", key=f"del_{i}"):
             st.session_state.shopping_cart.pop(i)
             st.rerun()
 
-    # 總額計算
-    discount = st.number_input("全單折扣 % OFF:", 0, 100, 0)
+    # 計算統計
+    st.divider()
+    discount = st.number_input("折扣 % OFF:", 0, 100, 0)
     mult = (100 - discount) / 100
-    total = sum(x['Price'] for x in st.session_state.shopping_cart) * mult
-    st.success(f"### 應付總額: ${total:.2f}")
+    total = sum(item['Price'] for item in st.session_state.shopping_cart) * mult
+    st.success(f"### 總額: ${total:.2f}")
 
-    if st.button("💾 儲存記憶庫", use_container_width=True):
+    if st.button("💾 儲存並更新記憶", use_container_width=True):
         try:
             old_df = conn.read(worksheet="Sheet1")
-            new_data = pd.DataFrame(st.session_state.shopping_cart)[['Item', 'Category']]
+            new_data = df_cart[['Item', 'Category']].copy()
             updated_df = pd.concat([old_df, new_data]).drop_duplicates(subset=['Item'], keep='last')
             conn.update(worksheet="Sheet1", data=updated_df)
-            st.toast("✅ 同步成功！")
+            st.toast("✅ 成功存入雲端！")
             st.cache_data.clear()
         except Exception as e:
             st.error(f"儲存失敗: {e}")
